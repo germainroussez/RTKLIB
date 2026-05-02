@@ -866,17 +866,48 @@ typedef struct {        /* per-(MT,MID) HAS page accumulator -------------*/
     uint8_t pages[HAS_MAX_MS][HAS_ENC_BYTES]; /* encoded page payloads  */
 } gal_has_chan_t;
 
+#define HAS_LINK_TIMEOUT   1800.0       /* (Mask ID, IOD Set ID) validity */
+#define HAS_NMASK          32           /* number of distinct Mask IDs     */
+#define HAS_NIOD_SET       32           /* number of distinct IOD Set IDs  */
+#define HAS_NSYS_MAX       2            /* max GNSS in MT1 (GPS+GAL)       */
+#define HAS_NSAT_MAX       40           /* max satellites per GNSS mask    */
+#define HAS_NSIG_MAX       16           /* max signals per GNSS mask       */
+
+typedef struct {        /* mask state cached per Mask ID, ICD 7.6 ----*/
+    int valid;          /* 1 if this slot stores a defined mask      */
+    gtime_t t0;         /* reception time                            */
+    int nsys;
+    uint8_t gnss_id[HAS_NSYS_MAX];
+    uint8_t sat_mask[HAS_NSYS_MAX][5];      /* 40-bit per GNSS       */
+    uint16_t sig_mask[HAS_NSYS_MAX];        /* 16-bit per GNSS       */
+    uint8_t cmaf[HAS_NSYS_MAX];             /* cell mask avail. flag */
+    uint8_t cell_mask[HAS_NSYS_MAX][HAS_NSAT_MAX * HAS_NSIG_MAX / 8 + 1];
+    int cell_mask_bits[HAS_NSYS_MAX];
+    int nsat[HAS_NSYS_MAX];                 /* popcount(sat_mask)    */
+    int nsig[HAS_NSYS_MAX];                 /* popcount(sig_mask)    */
+    uint8_t nm[HAS_NSYS_MAX];               /* nav msg index         */
+} gal_has_mask_cache_t;
+
+typedef struct {        /* IOD set state cached per IOD Set ID -------*/
+    int valid;          /* 1 if this slot stores a defined set       */
+    gtime_t t0;         /* reception time of the orbit MT1           */
+    int linked_mask_id; /* Mask ID this set was defined under        */
+    int nsat_all;       /* total satellites in the linked mask       */
+    int sat_no[HAS_NSYS_MAX * HAS_NSAT_MAX];  /* RTKLIB satno per row*/
+    int iod_ref[HAS_NSYS_MAX * HAS_NSAT_MAX]; /* IODref per row      */
+} gal_has_iodset_cache_t;
+
 typedef struct {        /* HAS reception state -------------------------*/
     gal_has_chan_t chan[HAS_MAX_CHAN]; /* per-MID page accumulators    */
     int mt, mid, ms;    /* metadata of the last assembled message      */
     gtime_t t;          /* time of the last assembled message          */
     int n;              /* size of msg[] in octets, MS * 53            */
     uint8_t msg[HAS_MAX_MS * HAS_ENC_BYTES]; /* last decoded message  */
+    /* SSR adapter linkage state (ICD section 7.6) ------------------- */
+    gal_has_mask_cache_t   mask_cache  [HAS_NMASK];
+    gal_has_iodset_cache_t iodset_cache[HAS_NIOD_SET];
 } gal_has_t;
 
-#define HAS_NSYS_MAX       2            /* max GNSS in MT1 (GPS+GAL)      */
-#define HAS_NSAT_MAX       40           /* max satellites per GNSS mask   */
-#define HAS_NSIG_MAX       16           /* max signals per GNSS mask      */
 #define HAS_GNSS_GPS       0            /* GNSS index for GPS (ICD 5.2.1.1)*/
 #define HAS_GNSS_GAL       2            /* GNSS index for Galileo         */
 #define HAS_NA_DR          (-4096)      /* DR raw "1000000000000" = N/A   */
@@ -1850,6 +1881,9 @@ EXPORT int  has_input_page(gal_has_t *has, gtime_t time, const uint8_t *page);
 
 /* Galileo HAS MT1 message parser --------------------------------------------*/
 EXPORT int  has_parse_mt1 (const uint8_t *msg, int n, gal_has_msg_t *out);
+
+/* Galileo HAS SSR adapter (gal_has_msg_t -> nav.ssr[]) ----------------------*/
+EXPORT int  has_apply_corrections(nav_t *nav);
 
 /* solution functions --------------------------------------------------------*/
 EXPORT void initsolbuf(solbuf_t *solbuf, int cyclic, int nmax);

@@ -41,12 +41,26 @@
 *     each content block whose flag is set: Mask, Orbit Corrections, Clock
 *     Full-Set Corrections, Clock Subset Corrections, Code Biases and
 *     Phase Biases. Block lengths are derived from the just-parsed Mask
-*     (Nsys, per-GNSS Nsat / Nsig, optional cell mask). This section
-*     performs only the parsing step; the mapping of HAS data onto
-*     nav.ssr[], the application of the validity-interval logic and the
-*     conversion of HAS signal indexes into RTKLIB CODE_* identifiers are
-*     deferred to the SSR adapter that lands in a later commit so the
-*     parser stays purely syntactic and trivially testable.
+*     (Nsys, per-GNSS Nsat / Nsig, optional cell mask).
+*
+*     === SSR adapter (ICD section 7) ===
+*     Maps a parsed gal_has_msg_t onto nav.ssr[sat] so that the existing
+*     RTKLIB SSR consumers (ephemeris.c::satpos_ssr, ppp.c, postpos.c) can
+*     apply HAS corrections through the EPHOPT_SSRAPC code path. The
+*     adapter resolves HAS signal indexes (ICD Table 20) to RTKLIB CODE_*
+*     identifiers, converts HAS satellite indexes (ICD Table 19) to RTKLIB
+*     satellite numbers via satno(), translates Validity Interval indexes
+*     (ICD Table 23) to seconds and computes the absolute message
+*     reference time t_MT1 from TOH per ICD Eq.28-29. It maintains a
+*     persistent linkage state for the (Mask ID, IOD Set ID) pairs
+*     described in ICD section 7.6 so that clock-only or bias-only MT1
+*     messages can be applied to the satellites and Reference IODs defined
+*     by an earlier mask + orbit MT1.
+*
+*     Sign conventions are flipped where the HAS ICD adds a quantity that
+*     RTKLIB subtracts at apply time (orbit deltas, code biases, phase
+*     biases); the clock correction sign matches RTKLIB without a flip.
+*     Phase biases are converted from cycles (ICD) to metres (ssr_t).
 *
 * references :
 *     [1] European GNSS Service Centre, Galileo High Accuracy Service
@@ -1010,4 +1024,412 @@ extern int has_parse_mt1(const uint8_t *msg, int n, gal_has_msg_t *out)
           out->hdr.clk_sub_flag, out->hdr.cb_flag, out->hdr.pb_flag,
           off, n * 8);
     return 0;
+}
+
+/* ===========================================================================
+ *  SSR adapter: gal_has_msg_t -> nav.ssr[] (HAS SIS ICD section 7)
+ * =========================================================================*/
+
+/* HAS signal index (ICD Table 20) to RTKLIB CODE_* mapping ------------------*/
+/* gnss_id : 0=GPS, 2=GAL                                                    */
+/* sig_idx : 0..15 per ICD Signal Mask                                       */
+/* Returns CODE_NONE for unknown / reserved entries.                         */
+static int has_sig_to_code(int gnss_id, int sig_idx)
+{
+    if (gnss_id == HAS_GNSS_GPS) {
+        switch (sig_idx) {
+            case  0: return CODE_L1C;   /* L1 C/A             */
+            case  3: return CODE_L1S;   /* L1C(D)             */
+            case  4: return CODE_L1L;   /* L1C(P)             */
+            case  5: return CODE_L1X;   /* L1C(D+P)           */
+            case  6: return CODE_L2S;   /* L2 CM              */
+            case  7: return CODE_L2L;   /* L2 CL              */
+            case  8: return CODE_L2X;   /* L2 CM+CL           */
+            case  9: return CODE_L2P;   /* L2 P               */
+            case 11: return CODE_L5I;   /* L5 I               */
+            case 12: return CODE_L5Q;   /* L5 Q               */
+            case 13: return CODE_L5X;   /* L5 I + L5 Q        */
+        }
+    }
+    else if (gnss_id == HAS_GNSS_GAL) {
+        switch (sig_idx) {
+            case  0: return CODE_L1B;   /* E1-B I/NAV OS      */
+            case  1: return CODE_L1C;   /* E1-C               */
+            case  2: return CODE_L1X;   /* E1-B + E1-C        */
+            case  3: return CODE_L5I;   /* E5a-I F/NAV OS     */
+            case  4: return CODE_L5Q;   /* E5a-Q              */
+            case  5: return CODE_L5X;   /* E5a-I + E5a-Q      */
+            case  6: return CODE_L7I;   /* E5b-I I/NAV OS     */
+            case  7: return CODE_L7Q;   /* E5b-Q              */
+            case  8: return CODE_L7X;   /* E5b-I + E5b-Q      */
+            case  9: return CODE_L8I;   /* E5-I               */
+            case 10: return CODE_L8Q;   /* E5-Q               */
+            case 11: return CODE_L8X;   /* E5-I + E5-Q        */
+            case 12: return CODE_L6B;   /* E6-B C/NAV HAS     */
+            case 13: return CODE_L6C;   /* E6-C               */
+            case 14: return CODE_L6X;   /* E6-B + E6-C        */
+        }
+    }
+    return CODE_NONE;
+}
+/* HAS GNSS index (ICD Table 18) to RTKLIB SYS_* mapping ---------------------*/
+static int has_gnss_to_sys(int gnss_id)
+{
+    if (gnss_id == HAS_GNSS_GPS) return SYS_GPS;
+    if (gnss_id == HAS_GNSS_GAL) return SYS_GAL;
+    return SYS_NONE;
+}
+/* HAS satellite index (1-based SVID per ICD Table 19) to RTKLIB satno -------*/
+/* Returns 0 if the (gnss_id, svid) pair is invalid.                          */
+static int has_sat_to_satno(int gnss_id, int svid)
+{
+    int sys = has_gnss_to_sys(gnss_id);
+    if (!sys || svid < 1) return 0;
+    return satno(sys, svid);
+}
+/* Validity Interval Index (ICD Table 23) to seconds -------------------------*/
+/* Returns 0.0 for the reserved index 15.                                     */
+static double has_vi_to_seconds(int vi)
+{
+    static const double tbl[16] = {
+        5.0,    10.0,   15.0,   20.0,   30.0,   60.0,   90.0,   120.0,
+        180.0,  240.0,  300.0,  600.0,  900.0,  1800.0, 3600.0, 0.0
+    };
+    if (vi < 0 || vi > 15) return 0.0;
+    return tbl[vi];
+}
+/* compute the absolute MT1 reference time from TOH (ICD Eq. 28-29) ----------*/
+/* t_recv : reception time in GST. The TOH gives the time of the hour at the */
+/* MT1 reference instant; the absolute reference time is the largest         */
+/* hour-aligned base less or equal to t_recv such that base + TOH <= t_recv. */
+static gtime_t has_compute_t_mt1(int toh, gtime_t t_recv)
+{
+    int week;
+    double tow;
+    double hr_floor, t_mt1;
+
+    if (t_recv.time == 0) return t_recv;
+    tow = time2gpst(t_recv, &week);
+    hr_floor = floor(tow / 3600.0) * 3600.0;
+    t_mt1 = hr_floor + (double)toh;
+    if (t_mt1 > tow) t_mt1 -= 3600.0;
+    return gpst2time(week, t_mt1);
+}
+/* store the mask block of msg in has->mask_cache[mask_id] ------------------*/
+static void apply_mask(gal_has_t *has, const gal_has_msg_t *msg)
+{
+    int mid = msg->hdr.mask_id;
+    gal_has_mask_cache_t *m = &has->mask_cache[mid];
+    int i, j;
+
+    if (mid < 0 || mid >= HAS_NMASK) return;
+
+    memset(m, 0, sizeof(*m));
+    m->valid = 1;
+    m->t0    = has->t;
+    m->nsys  = msg->nsys;
+    for (i = 0; i < msg->nsys && i < HAS_NSYS_MAX; i++) {
+        const gal_has_mask_t *src = &msg->mask[i];
+        m->gnss_id[i] = src->gnss_id;
+        memcpy(m->sat_mask[i], src->sat_mask, 5);
+        m->sig_mask[i] = src->sig_mask;
+        m->cmaf[i]     = src->cmaf;
+        m->cell_mask_bits[i] = src->cell_mask_bits;
+        for (j = 0; j < (src->cell_mask_bits + 7) / 8 &&
+                    j < (int)sizeof(m->cell_mask[0]); j++) {
+            m->cell_mask[i][j] = src->cell_mask[j];
+        }
+        m->nsat[i] = src->nsat;
+        m->nsig[i] = src->nsig;
+        m->nm[i]   = src->nm;
+    }
+    trace(3, "has: mask_cache[%d] stored, nsys=%d\n", mid, m->nsys);
+}
+/* apply orbit corrections of msg into nav.ssr[] and update IOD set linkage -*/
+static int apply_orbit(gal_has_t *has, const gal_has_msg_t *msg, nav_t *nav)
+{
+    int mid    = msg->hdr.mask_id;
+    int iodset = msg->hdr.iod_set_id;
+    gal_has_mask_cache_t *m = &has->mask_cache[mid];
+    gal_has_iodset_cache_t *iset = &has->iodset_cache[iodset];
+    gtime_t t = has_compute_t_mt1(msg->hdr.toh, has->t);
+    double udi = has_vi_to_seconds(msg->orbit_vi);
+    int i, k = 0, k_iset = 0, sat;
+
+    if (mid < 0 || mid >= HAS_NMASK || iodset < 0 || iodset >= HAS_NIOD_SET) {
+        return 0;
+    }
+    if (!m->valid) {
+        trace(2, "has: orbit MT1 references undefined Mask ID=%d\n", mid);
+        return 0;
+    }
+    memset(iset, 0, sizeof(*iset));
+    iset->valid = 1;
+    iset->t0 = has->t;
+    iset->linked_mask_id = mid;
+
+    for (i = 0; i < msg->nsys && i < HAS_NSYS_MAX; i++) {
+        int gnss_id = msg->mask[i].gnss_id;
+        int n = msg->mask[i].nsat;
+        int j;
+        for (j = 0; j < n; j++) {
+            const gal_has_orbit_t *o = &msg->orbit[i][j];
+            int svid = msg->mask[i].sat_idx[j];
+            sat = has_sat_to_satno(gnss_id, svid);
+            if (k_iset < HAS_NSYS_MAX * HAS_NSAT_MAX) {
+                iset->sat_no[k_iset]  = sat;
+                iset->iod_ref[k_iset] = o->iod;
+                k_iset++;
+            }
+            if (sat == 0 || o->dr == HAS_NA_DR) { k++; continue; }
+            /* RTKLIB stores deph as "to subtract"; HAS adds (Eq.22) */
+            nav->ssr[sat-1].deph[0]  = -((double)o->dr ) * 0.0025;
+            nav->ssr[sat-1].deph[1]  = -((double)o->dit) * 0.008;
+            nav->ssr[sat-1].deph[2]  = -((double)o->dct) * 0.008;
+            nav->ssr[sat-1].ddeph[0] = 0.0;
+            nav->ssr[sat-1].ddeph[1] = 0.0;
+            nav->ssr[sat-1].ddeph[2] = 0.0;
+            nav->ssr[sat-1].iode     = o->iod;
+            nav->ssr[sat-1].iod[0]   = iodset;
+            nav->ssr[sat-1].t0[0]    = t;
+            nav->ssr[sat-1].udi[0]   = udi;
+            nav->ssr[sat-1].refd     = 0;
+            nav->ssr[sat-1].update   = 1;
+            k++;
+        }
+    }
+    iset->nsat_all = k_iset;
+    trace(3, "has: orbit applied for iodset=%d (mask=%d nsat=%d)\n",
+          iodset, mid, k_iset);
+    return k;
+}
+/* apply Clock Full-Set corrections of msg into nav.ssr[] -------------------*/
+static int apply_clock_full(gal_has_t *has, const gal_has_msg_t *msg,
+                            nav_t *nav)
+{
+    int mid    = msg->hdr.mask_id;
+    int iodset = msg->hdr.iod_set_id;
+    const gal_has_mask_cache_t   *m    = &has->mask_cache[mid];
+    const gal_has_iodset_cache_t *iset = &has->iodset_cache[iodset];
+    gtime_t t = has_compute_t_mt1(msg->hdr.toh, has->t);
+    double udi = has_vi_to_seconds(msg->clk_full_vi);
+    int i, k_iset = 0, applied = 0;
+
+    if (mid < 0 || mid >= HAS_NMASK || iodset < 0 || iodset >= HAS_NIOD_SET) {
+        return 0;
+    }
+    if (!m->valid || !iset->valid || iset->linked_mask_id != mid) {
+        trace(2, "has: clock_full MT1 mask=%d iodset=%d not linked\n",
+              mid, iodset);
+        return 0;
+    }
+    for (i = 0; i < m->nsys; i++) {
+        int n = m->nsat[i];
+        int j;
+        int dcm = msg->dcm[i];
+        for (j = 0; j < n; j++, k_iset++) {
+            int16_t dcc = msg->dcc[i][j];
+            int sat;
+            if (k_iset >= iset->nsat_all) break;
+            sat = iset->sat_no[k_iset];
+            if (sat == 0) continue;
+            if (dcc == HAS_NA_DCC || dcc == HAS_DCC_NOTUSE) continue;
+            /* delta_C = DCM * DCC * scale, additive into ssr.dclk[0] */
+            nav->ssr[sat-1].dclk[0] = (double)dcm * (double)dcc * 0.0025;
+            nav->ssr[sat-1].dclk[1] = 0.0;
+            nav->ssr[sat-1].dclk[2] = 0.0;
+            nav->ssr[sat-1].iod[1]  = iodset;
+            nav->ssr[sat-1].t0[1]   = t;
+            nav->ssr[sat-1].udi[1]  = udi;
+            nav->ssr[sat-1].update  = 1;
+            applied++;
+        }
+    }
+    trace(3, "has: clock_full applied for %d sats (iodset=%d)\n",
+          applied, iodset);
+    return applied;
+}
+/* apply Clock Subset corrections of msg into nav.ssr[] ---------------------*/
+static int apply_clock_subset(gal_has_t *has, const gal_has_msg_t *msg,
+                              nav_t *nav)
+{
+    int mid    = msg->hdr.mask_id;
+    int iodset = msg->hdr.iod_set_id;
+    const gal_has_mask_cache_t   *m    = &has->mask_cache[mid];
+    const gal_has_iodset_cache_t *iset = &has->iodset_cache[iodset];
+    gtime_t t = has_compute_t_mt1(msg->hdr.toh, has->t);
+    double udi = has_vi_to_seconds(msg->clk_sub_vi);
+    int s, applied = 0;
+
+    if (!m->valid || !iset->valid || iset->linked_mask_id != mid) return 0;
+
+    for (s = 0; s < msg->nsys_sub && s < HAS_NSYS_MAX; s++) {
+        int gnss_id = msg->sub_gnss_id[s];
+        int dcm     = msg->sub_dcm[s];
+        int i, k_iset = 0, j_sub = 0;
+        for (i = 0; i < m->nsys; i++) {
+            int n = m->nsat[i];
+            int j;
+            if (m->gnss_id[i] != gnss_id) { k_iset += n; continue; }
+            for (j = 0; j < n; j++, k_iset++) {
+                int sat;
+                int16_t dcc;
+                if (!msg->sub_sat_mask[s][j]) continue;
+                if (j_sub >= HAS_NSAT_MAX) break;
+                dcc = msg->sub_dcc[s][j_sub++];
+                if (k_iset >= iset->nsat_all) continue;
+                sat = iset->sat_no[k_iset];
+                if (sat == 0) continue;
+                if (dcc == HAS_NA_DCC || dcc == HAS_DCC_NOTUSE) continue;
+                nav->ssr[sat-1].dclk[0] = (double)dcm * (double)dcc * 0.0025;
+                nav->ssr[sat-1].dclk[1] = 0.0;
+                nav->ssr[sat-1].dclk[2] = 0.0;
+                nav->ssr[sat-1].iod[1]  = iodset;
+                nav->ssr[sat-1].t0[1]   = t;
+                nav->ssr[sat-1].udi[1]  = udi;
+                nav->ssr[sat-1].update  = 1;
+                applied++;
+            }
+        }
+    }
+    trace(3, "has: clock_subset applied for %d sats (iodset=%d)\n",
+          applied, iodset);
+    return applied;
+}
+/* apply Code Bias corrections of msg into nav.ssr[].cbias[code] ------------*/
+static int apply_code_bias(gal_has_t *has, const gal_has_msg_t *msg,
+                           nav_t *nav)
+{
+    int mid    = msg->hdr.mask_id;
+    int iodset = msg->hdr.iod_set_id;
+    const gal_has_mask_cache_t   *m    = &has->mask_cache[mid];
+    const gal_has_iodset_cache_t *iset = &has->iodset_cache[iodset];
+    gtime_t t = has_compute_t_mt1(msg->hdr.toh, has->t);
+    double udi = has_vi_to_seconds(msg->cb_vi);
+    int i, applied = 0;
+
+    if (!m->valid || !iset->valid || iset->linked_mask_id != mid) return 0;
+
+    for (i = 0; i < msg->nsys && i < HAS_NSYS_MAX; i++) {
+        int gnss_id = msg->mask[i].gnss_id;
+        int nsat = msg->mask[i].nsat;
+        int nsig = msg->mask[i].nsig;
+        int j, k;
+        int row_offset = 0;
+        int g;
+        for (g = 0; g < i; g++) row_offset += m->nsat[g];
+
+        for (j = 0; j < nsat; j++) {
+            int sat;
+            if (row_offset + j >= iset->nsat_all) break;
+            sat = iset->sat_no[row_offset + j];
+            if (sat == 0) continue;
+            for (k = 0; k < nsig; k++) {
+                int sig_idx = msg->mask[i].sig_idx[k];
+                int code, cb_raw;
+                if (!msg->bias[i][j][k].cb_valid) continue;
+                cb_raw = msg->bias[i][j][k].cb;
+                if (cb_raw == HAS_NA_BIAS) continue;
+                code = has_sig_to_code(gnss_id, sig_idx);
+                if (code <= 0 || code >= MAXCODE) continue;
+                /* RTKLIB subtracts cbias from P; HAS adds (Eq.25) -> flip */
+                nav->ssr[sat-1].cbias[code-1] = (float)(-(double)cb_raw * 0.02);
+                nav->ssr[sat-1].iod[4] = iodset;
+                nav->ssr[sat-1].t0[4]  = t;
+                nav->ssr[sat-1].udi[4] = udi;
+                nav->ssr[sat-1].update = 1;
+                applied++;
+            }
+        }
+    }
+    trace(3, "has: code_bias applied (%d entries, iodset=%d)\n", applied, iodset);
+    return applied;
+}
+/* apply Phase Bias corrections of msg into nav.ssr[].pbias[code] -----------*/
+static int apply_phase_bias(gal_has_t *has, const gal_has_msg_t *msg,
+                            nav_t *nav)
+{
+    int mid    = msg->hdr.mask_id;
+    int iodset = msg->hdr.iod_set_id;
+    const gal_has_mask_cache_t   *m    = &has->mask_cache[mid];
+    const gal_has_iodset_cache_t *iset = &has->iodset_cache[iodset];
+    gtime_t t = has_compute_t_mt1(msg->hdr.toh, has->t);
+    double udi = has_vi_to_seconds(msg->pb_vi);
+    int i, applied = 0;
+
+    if (!m->valid || !iset->valid || iset->linked_mask_id != mid) return 0;
+
+    for (i = 0; i < msg->nsys && i < HAS_NSYS_MAX; i++) {
+        int gnss_id = msg->mask[i].gnss_id;
+        int nsat = msg->mask[i].nsat;
+        int nsig = msg->mask[i].nsig;
+        int j, k;
+        int row_offset = 0;
+        int g;
+        for (g = 0; g < i; g++) row_offset += m->nsat[g];
+
+        for (j = 0; j < nsat; j++) {
+            int sat;
+            double freq;
+            if (row_offset + j >= iset->nsat_all) break;
+            sat = iset->sat_no[row_offset + j];
+            if (sat == 0) continue;
+            for (k = 0; k < nsig; k++) {
+                int sig_idx = msg->mask[i].sig_idx[k];
+                int code, pb_raw;
+                double pb_cycles, pb_metres;
+                if (!msg->bias[i][j][k].pb_valid) continue;
+                pb_raw = msg->bias[i][j][k].pb;
+                if (pb_raw == HAS_NA_BIAS) continue;
+                code = has_sig_to_code(gnss_id, sig_idx);
+                if (code <= 0 || code >= MAXCODE) continue;
+                freq = code2freq(has_gnss_to_sys(gnss_id), (uint8_t)code, 0);
+                if (freq <= 0.0) continue;
+                pb_cycles = (double)pb_raw * 0.01;
+                /* RTKLIB subtracts pbias*freq/c from L cycles; HAS adds */
+                /* (Eq.26). Store -PB in cycles -> metres via wavelength.*/
+                pb_metres = -pb_cycles * (CLIGHT / freq);
+                nav->ssr[sat-1].pbias[code-1] = pb_metres;
+                nav->ssr[sat-1].stdpb[code-1] = 0.0f;
+                nav->ssr[sat-1].iod[5] = iodset;
+                nav->ssr[sat-1].t0[5]  = t;
+                nav->ssr[sat-1].udi[5] = udi;
+                nav->ssr[sat-1].update = 1;
+                applied++;
+            }
+        }
+    }
+    trace(3, "has: phase_bias applied (%d entries, iodset=%d)\n",
+          applied, iodset);
+    return applied;
+}
+/* apply the corrections held in nav.has.msg into nav.ssr[] -----------------*/
+/* Parses nav.has.msg (size nav.has.n) as an MT1 message, then dispatches    */
+/* the content blocks it contains based on their flags. Returns 0 on parse   */
+/* failure or an empty buffer, 1 on a successful dispatch (some blocks may   */
+/* still have been skipped if their (Mask ID, IOD Set ID) link was missing). */
+extern int has_apply_corrections(nav_t *nav)
+{
+    static gal_has_msg_t parsed;        /* large; static to avoid stack */
+    gal_has_t *has;
+
+    if (!nav) return 0;
+    has = &nav->has;
+    if (has->n <= 0) return 0;
+
+    if (has_parse_mt1(has->msg, has->n, &parsed) != 0) {
+        trace(2, "has_apply_corrections: MT1 parse failed\n");
+        return 0;
+    }
+    /* Blocks are processed in ICD Table 14 order. */
+    if (parsed.hdr.mask_flag)     apply_mask        (has, &parsed);
+    if (parsed.hdr.orbit_flag)    apply_orbit       (has, &parsed, nav);
+    if (parsed.hdr.clk_full_flag) apply_clock_full  (has, &parsed, nav);
+    if (parsed.hdr.clk_sub_flag)  apply_clock_subset(has, &parsed, nav);
+    if (parsed.hdr.cb_flag)       apply_code_bias   (has, &parsed, nav);
+    if (parsed.hdr.pb_flag)       apply_phase_bias  (has, &parsed, nav);
+
+    trace(3, "has_apply_corrections: ok, mid=%d iodset=%d toh=%d\n",
+          parsed.hdr.mask_id, parsed.hdr.iod_set_id, parsed.hdr.toh);
+    return 1;
 }
