@@ -254,7 +254,7 @@ static int ubx_sig_combined(int sys, int sigid)
         }
     else if (sys == SYS_QZS) {
         if (sigid == 0) return CODE_L1C; /* L1C/A */
-        if (sigid==1) return CODE_L1C; /* L1S */
+        if (sigid==1) return CODE_L1Z; /* L1S */
         if (sigid==4) return CODE_L2X; /* L2CM */
         if (sigid==5) return CODE_L2X; /* L2CL */
         if (sigid==8) return CODE_L5X; /* L5I */
