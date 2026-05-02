@@ -1738,6 +1738,10 @@ EXPORT int input_rtcm3f(rtcm_t *rtcm, FILE *fp);
 EXPORT int gen_rtcm2   (rtcm_t *rtcm, int type, int sync);
 EXPORT int gen_rtcm3   (rtcm_t *rtcm, int type, int subtype, int sync);
 
+/* Galileo HAS Reed-Solomon erasure decoder (HPVRS) --------------------------*/
+EXPORT int has_rs_decode(const uint8_t *enc, const uint8_t *pids, int k,
+                         uint8_t *dec);
+
 /* solution functions --------------------------------------------------------*/
 EXPORT void initsolbuf(solbuf_t *solbuf, int cyclic, int nmax);
 EXPORT void freesolbuf(solbuf_t *solbuf);
