@@ -111,7 +111,7 @@ static int test_minimal_mask(void)
     pack_u(&p, 6, 0);                   /* mask block reserved trailer */
 
     n = (p.off + 7) / 8;
-    if (has_parse_mt1(p.buf, n, &out) != 0) {
+    if (has_parse_mt1(p.buf, n, &out, NULL) != 0) {
         fprintf(stderr, "test1: has_parse_mt1 returned non-zero\n");
         return 1;
     }
@@ -231,7 +231,7 @@ static int test_complete_mt1(void)
     }
     n = (p.off + 7) / 8;
 
-    if (has_parse_mt1(p.buf, n, &out) != 0) {
+    if (has_parse_mt1(p.buf, n, &out, NULL) != 0) {
         fprintf(stderr, "test2: has_parse_mt1 returned non-zero\n");
         return 1;
     }
@@ -351,7 +351,7 @@ static int test_annexc_smoke(void)
     gal_has_msg_t out;
     int rc;
 
-    rc = has_parse_mt1(annexc_msg, (int)sizeof(annexc_msg), &out);
+    rc = has_parse_mt1(annexc_msg, (int)sizeof(annexc_msg), &out, NULL);
     if (rc != 0) {
         fprintf(stderr, "test3: parse_mt1 returned %d\n", rc);
         return 1;

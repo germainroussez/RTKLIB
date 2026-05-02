@@ -1880,7 +1880,11 @@ EXPORT void has_init      (gal_has_t *has);
 EXPORT int  has_input_page(gal_has_t *has, gtime_t time, const uint8_t *page);
 
 /* Galileo HAS MT1 message parser --------------------------------------------*/
-EXPORT int  has_parse_mt1 (const uint8_t *msg, int n, gal_has_msg_t *out);
+/* The optional has parameter provides the cached mask context used to size  */
+/* the clock and bias blocks of MT1 messages whose Mask Flag is 0; pass NULL */
+/* when the caller knows the message contains its own Mask block.            */
+EXPORT int  has_parse_mt1 (const uint8_t *msg, int n, gal_has_msg_t *out,
+                           const gal_has_t *has);
 
 /* Galileo HAS SSR adapter (gal_has_msg_t -> nav.ssr[]) ----------------------*/
 EXPORT int  has_apply_corrections(nav_t *nav);

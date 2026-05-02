@@ -968,12 +968,57 @@ static int parse_phase_bias_block(const uint8_t *msg, int nbytes, int off,
     }
     return off;
 }
+/* populate out->mask from a cached Mask ID entry (clock-/bias-only MT1) ---*/
+/* Used when the current MT1 has Mask Flag=0 and the block parsers need to  */
+/* size variable-length fields from a previously received mask. Returns 1   */
+/* on success, 0 if the cache slot is invalid or out of range.              */
+static int restore_mask_from_cache(gal_has_msg_t *out, int mask_id,
+                                   const gal_has_t *has)
+{
+    const gal_has_mask_cache_t *c;
+    int i, j, k;
+
+    if (!has || mask_id < 0 || mask_id >= HAS_NMASK) return 0;
+    c = &has->mask_cache[mask_id];
+    if (!c->valid) return 0;
+
+    out->nsys = c->nsys;
+    for (i = 0; i < c->nsys && i < HAS_NSYS_MAX; i++) {
+        gal_has_mask_t *dst = &out->mask[i];
+        memset(dst, 0, sizeof(*dst));
+        dst->gnss_id = c->gnss_id[i];
+        memcpy(dst->sat_mask, c->sat_mask[i], 5);
+        dst->sig_mask = c->sig_mask[i];
+        dst->cmaf     = c->cmaf[i];
+        dst->cell_mask_bits = c->cell_mask_bits[i];
+        if (dst->cell_mask_bits > 0 &&
+            dst->cell_mask_bits <= (int)sizeof(dst->cell_mask) * 8) {
+            int nb = (dst->cell_mask_bits + 7) / 8;
+            if (nb > (int)sizeof(c->cell_mask[0])) nb = sizeof(c->cell_mask[0]);
+            memcpy(dst->cell_mask, c->cell_mask[i], nb);
+        }
+        dst->nm   = c->nm[i];
+        dst->nsat = c->nsat[i];
+        dst->nsig = c->nsig[i];
+        for (j = 0, k = 0; j < 40 && k < dst->nsat; j++) {
+            if (getbitu(dst->sat_mask, j, 1)) dst->sat_idx[k++] = j + 1;
+        }
+        for (j = 0, k = 0; j < 16 && k < dst->nsig; j++) {
+            if ((dst->sig_mask >> (15 - j)) & 1) dst->sig_idx[k++] = j;
+        }
+    }
+    return 1;
+}
 /* parse a complete HAS MT1 message ------------------------------------------*/
 /* msg : pointer to the assembled message bytes (output of has_input_page). */
 /* n   : message length in octets (== ms * 53).                             */
 /* out : caller-provided gal_has_msg_t cleared and filled by this function. */
+/* has : optional reception state used to restore the Mask block from cache */
+/*       when the current MT1 has Mask Flag = 0; pass NULL when the message */
+/*       carries its own mask.                                              */
 /* Returns 0 on success, -1 on truncated input or invalid field.            */
-extern int has_parse_mt1(const uint8_t *msg, int n, gal_has_msg_t *out)
+extern int has_parse_mt1(const uint8_t *msg, int n, gal_has_msg_t *out,
+                         const gal_has_t *has)
 {
     int off;
 
@@ -984,6 +1029,14 @@ extern int has_parse_mt1(const uint8_t *msg, int n, gal_has_msg_t *out)
     memset(out, 0, sizeof(*out));
 
     if ((off = parse_mt1_header(msg, n, &out->hdr)) < 0) return -1;
+
+    /* Restore the cached mask context for clock-only / bias-only messages.*/
+    if (!out->hdr.mask_flag &&
+        !restore_mask_from_cache(out, out->hdr.mask_id, has)) {
+        trace(2, "has_parse_mt1: mask_flag=0 references undefined "
+              "Mask ID=%d\n", out->hdr.mask_id);
+        return -1;
+    }
 
     /* Blocks are decoded strictly in the order listed in ICD Table 14:     */
     /* Mask -> Orbit -> Clock Full-Set -> Clock Subset -> Code -> Phase.     */
@@ -1417,7 +1470,7 @@ extern int has_apply_corrections(nav_t *nav)
     has = &nav->has;
     if (has->n <= 0) return 0;
 
-    if (has_parse_mt1(has->msg, has->n, &parsed) != 0) {
+    if (has_parse_mt1(has->msg, has->n, &parsed, has) != 0) {
         trace(2, "has_apply_corrections: MT1 parse failed\n");
         return 0;
     }
