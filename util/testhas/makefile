@@ -12,10 +12,11 @@ CFLAGS = -std=c99 -Wall -O2 -pedantic -I$(SRC) \
          -DNFREQ=3 -DNEXOBS=3 -DSVR_REUSEADDR
 LDLIBS = -lm
 
-all             : test_has_rs test_has_decode
+all             : test_has_rs test_has_decode test_has_mt1
 
 test_has_rs     : test_has_rs.o     has.o rtkcmn.o
 test_has_decode : test_has_decode.o has.o rtkcmn.o
+test_has_mt1    : test_has_mt1.o    has.o rtkcmn.o
 
 has.o           : $(SRC)/rtklib.h $(SRC)/has.c
 	$(CC) -c $(CFLAGS) $(SRC)/has.c
@@ -23,8 +24,9 @@ rtkcmn.o        : $(SRC)/rtklib.h $(SRC)/rtkcmn.c
 	$(CC) -c $(CFLAGS) $(SRC)/rtkcmn.c
 
 test            :
-	./test_has_rs && ./test_has_decode
+	./test_has_rs && ./test_has_decode && ./test_has_mt1
 
 clean           :
-	rm -f test_has_rs test_has_rs.exe \
-	      test_has_decode test_has_decode.exe *.o
+	rm -f test_has_rs     test_has_rs.exe \
+	      test_has_decode test_has_decode.exe \
+	      test_has_mt1    test_has_mt1.exe *.o

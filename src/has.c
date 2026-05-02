@@ -34,6 +34,20 @@
 *     and stores the resulting message into nav.has.msg. Channels timing out
 *     past HAS_TIMEOUT seconds are dropped.
 *
+*     === MT1 message parser (ICD section 5) ===
+*     Walks the assembled HAS message bytes and fills a typed gal_has_msg_t
+*     intermediate representation. Decodes the MT1 header (TOH, six block
+*     flags, Mask ID, IOD Set ID) and then, in the ICD-prescribed order,
+*     each content block whose flag is set: Mask, Orbit Corrections, Clock
+*     Full-Set Corrections, Clock Subset Corrections, Code Biases and
+*     Phase Biases. Block lengths are derived from the just-parsed Mask
+*     (Nsys, per-GNSS Nsat / Nsig, optional cell mask). This section
+*     performs only the parsing step; the mapping of HAS data onto
+*     nav.ssr[], the application of the validity-interval logic and the
+*     conversion of HAS signal indexes into RTKLIB CODE_* identifiers are
+*     deferred to the SSR adapter that lands in a later commit so the
+*     parser stays purely syntactic and trivially testable.
+*
 * references :
 *     [1] European GNSS Service Centre, Galileo High Accuracy Service
 *         Signal-in-Space Interface Control Document, Issue 1.0, May 2022.
@@ -656,4 +670,344 @@ extern int has_input_page(gal_has_t *has, gtime_t time, const uint8_t *page)
     has->chan[idx].npage++;
 
     return try_decode(has, idx);
+}
+
+/* ===========================================================================
+ *  MT1 message parser (HAS SIS ICD section 5)
+ * =========================================================================*/
+
+/* IODref bit length per GNSS index, ICD Table 26 ----------------------------*/
+static int iod_bits(int gnss_id)
+{
+    switch (gnss_id) {
+        case HAS_GNSS_GPS: return 8;
+        case HAS_GNSS_GAL: return 10;
+    }
+    return 0;
+}
+/* sign-extend a getbitu()-extracted value of nbits bits ---------------------*/
+/* Used to recover the two's-complement signed values that HAS uses for DR,   */
+/* DIT, DCT, DCC, CB and PB. Returns the input unchanged when the sign bit is */
+/* zero, or input - 2^nbits when it is one.                                   */
+static int32_t sign_extend(uint32_t v, int nbits)
+{
+    uint32_t mask = (uint32_t)1u << (nbits - 1);
+    if (v & mask) return (int32_t)(v | (~((uint32_t)0) << nbits));
+    return (int32_t)v;
+}
+/* popcount over n bits of a buffer at a given bit offset --------------------*/
+static int popcount_bits(const uint8_t *buf, int off, int nbits)
+{
+    int i, c = 0;
+    for (i = 0; i < nbits; i++) c += getbitu(buf, off + i, 1);
+    return c;
+}
+/* parse the 32-bit MT1 header (ICD Table 12) --------------------------------*/
+/* Returns the bit offset just past the header on success, -1 on bad input.  */
+static int parse_mt1_header(const uint8_t *msg, int n, gal_has_mt1_hdr_t *h)
+{
+    if (n < 4) return -1;
+
+    h->toh           = (uint16_t)getbitu(msg,  0, 12);
+    h->mask_flag     = (uint8_t) getbitu(msg, 12,  1);
+    h->orbit_flag    = (uint8_t) getbitu(msg, 13,  1);
+    h->clk_full_flag = (uint8_t) getbitu(msg, 14,  1);
+    h->clk_sub_flag  = (uint8_t) getbitu(msg, 15,  1);
+    h->cb_flag       = (uint8_t) getbitu(msg, 16,  1);
+    h->pb_flag       = (uint8_t) getbitu(msg, 17,  1);
+    /* bits 18..21 are reserved (4 bits) */
+    h->mask_id       = (uint8_t) getbitu(msg, 22,  5);
+    h->iod_set_id    = (uint8_t) getbitu(msg, 27,  5);
+
+    if (h->toh > 3599) {
+        trace(2, "has mt1: invalid TOH=%d (>3599)\n", h->toh);
+        return -1;
+    }
+    return 32;
+}
+/* parse the Mask block (ICD section 5.2.1) ----------------------------------*/
+/* On entry, off is the bit offset of the Mask block within msg. On exit, the */
+/* function returns the bit offset just past the Mask block, or -1 on error. */
+static int parse_mask_block(const uint8_t *msg, int nbytes, int off,
+                            gal_has_msg_t *out)
+{
+    int i, j, k, nbits = nbytes * 8;
+    int nsys;
+
+    if (off + 4 > nbits) return -1;
+    nsys = getbitu(msg, off, 4); off += 4;
+    if (nsys < 1 || nsys > HAS_NSYS_MAX) {
+        trace(2, "has mt1: nsys=%d outside [1..%d]\n", nsys, HAS_NSYS_MAX);
+        return -1;
+    }
+    out->nsys = nsys;
+
+    for (i = 0; i < nsys; i++) {
+        gal_has_mask_t *m = &out->mask[i];
+
+        if (off + 4 + 40 + 16 + 1 > nbits) return -1;
+        m->gnss_id = (uint8_t)getbitu(msg, off, 4); off += 4;
+        for (j = 0; j < 5; j++) {
+            m->sat_mask[j] = (uint8_t)getbitu(msg, off, 8);
+            off += 8;
+        }
+        m->sig_mask = (uint16_t)getbitu(msg, off, 16); off += 16;
+        m->cmaf = (uint8_t)getbitu(msg, off, 1); off += 1;
+
+        m->nsat = popcount_bits(m->sat_mask, 0, 40);
+        m->nsig = 0;
+        for (j = 0; j < 16; j++) if ((m->sig_mask >> (15 - j)) & 1) m->nsig++;
+
+        /* cache satellite indexes (1-based per ICD Table 19) */
+        for (j = 0, k = 0; j < 40; j++) {
+            if (getbitu(m->sat_mask, j, 1)) m->sat_idx[k++] = j + 1;
+        }
+        /* cache signal indexes (0-based per ICD Table 20) */
+        for (j = 0, k = 0; j < 16; j++) {
+            if ((m->sig_mask >> (15 - j)) & 1) m->sig_idx[k++] = j;
+        }
+        m->cell_mask_bits = m->cmaf ? m->nsat * m->nsig : 0;
+        if (m->cell_mask_bits > (int)sizeof(m->cell_mask) * 8) {
+            trace(2, "has mt1: cell mask too large (%d bits)\n",
+                  m->cell_mask_bits);
+            return -1;
+        }
+        memset(m->cell_mask, 0, sizeof(m->cell_mask));
+        if (m->cmaf) {
+            if (off + m->cell_mask_bits > nbits) return -1;
+            for (j = 0; j < m->cell_mask_bits; j++) {
+                if (getbitu(msg, off + j, 1)) {
+                    setbitu(m->cell_mask, j, 1, 1);
+                }
+            }
+            off += m->cell_mask_bits;
+        }
+        if (off + 3 > nbits) return -1;
+        m->nm = (uint8_t)getbitu(msg, off, 3); off += 3;
+    }
+    /* 6-bit Reserved trailer of the Mask block ----------------------------- */
+    if (off + 6 > nbits) return -1;
+    off += 6;
+    return off;
+}
+/* parse the Orbit Corrections block (ICD section 5.2.2) ---------------------*/
+static int parse_orbit_block(const uint8_t *msg, int nbytes, int off,
+                             gal_has_msg_t *out)
+{
+    int i, j, nbits = nbytes * 8;
+
+    if (off + 4 > nbits) return -1;
+    out->orbit_vi = getbitu(msg, off, 4); off += 4;
+
+    for (i = 0; i < out->nsys; i++) {
+        const gal_has_mask_t *m = &out->mask[i];
+        int liod = iod_bits(m->gnss_id);
+        if (liod == 0) {
+            trace(2, "has mt1: unknown GNSS id=%d in orbit block\n",
+                  m->gnss_id);
+            return -1;
+        }
+        for (j = 0; j < m->nsat; j++) {
+            gal_has_orbit_t *o = &out->orbit[i][j];
+            if (off + liod + 13 + 12 + 12 > nbits) return -1;
+            o->iod = getbitu(msg, off, liod); off += liod;
+            o->dr  = (int16_t)sign_extend(getbitu(msg, off, 13), 13);
+            off += 13;
+            o->dit = (int16_t)sign_extend(getbitu(msg, off, 12), 12);
+            off += 12;
+            o->dct = (int16_t)sign_extend(getbitu(msg, off, 12), 12);
+            off += 12;
+        }
+    }
+    return off;
+}
+/* parse the Clock Full-Set block (ICD section 5.2.3) ------------------------*/
+static int parse_clock_full_block(const uint8_t *msg, int nbytes, int off,
+                                  gal_has_msg_t *out)
+{
+    int i, j, nbits = nbytes * 8;
+
+    if (off + 4 > nbits) return -1;
+    out->clk_full_vi = getbitu(msg, off, 4); off += 4;
+
+    /* Delta Clock Multipliers, 2 bits per GNSS ------------------------------*/
+    if (off + 2 * out->nsys > nbits) return -1;
+    for (i = 0; i < out->nsys; i++) {
+        out->dcm[i] = (uint8_t)getbitu(msg, off, 2) + 1; /* 0..3 -> 1..4 */
+        off += 2;
+    }
+    /* Delta Clock Corrections, 13 bits per satellite, all GNSS in mask order*/
+    for (i = 0; i < out->nsys; i++) {
+        const gal_has_mask_t *m = &out->mask[i];
+        for (j = 0; j < m->nsat; j++) {
+            if (off + 13 > nbits) return -1;
+            out->dcc[i][j] = (int16_t)sign_extend(getbitu(msg, off, 13), 13);
+            off += 13;
+        }
+    }
+    return off;
+}
+/* parse the Clock Subset block (ICD section 5.2.4) --------------------------*/
+static int parse_clock_subset_block(const uint8_t *msg, int nbytes, int off,
+                                    gal_has_msg_t *out)
+{
+    int i, j, nbits = nbytes * 8;
+
+    if (off + 4 + 4 > nbits) return -1;
+    out->clk_sub_vi = getbitu(msg, off, 4); off += 4;
+    out->nsys_sub   = getbitu(msg, off, 4); off += 4;
+
+    if (out->nsys_sub > HAS_NSYS_MAX) {
+        trace(2, "has mt1: nsys_sub=%d > %d\n", out->nsys_sub, HAS_NSYS_MAX);
+        return -1;
+    }
+    for (i = 0; i < out->nsys_sub; i++) {
+        int gnss_id, dcm, mask_idx, nsat_master, nsat_sub;
+        if (off + 4 + 2 > nbits) return -1;
+        gnss_id = getbitu(msg, off, 4); off += 4;
+        dcm     = getbitu(msg, off, 2) + 1; off += 2;
+        out->sub_gnss_id[i] = (uint8_t)gnss_id;
+        out->sub_dcm[i]     = (uint8_t)dcm;
+
+        /* Find the matching mask entry to size the SatMsub field. */
+        for (mask_idx = 0; mask_idx < out->nsys; mask_idx++) {
+            if (out->mask[mask_idx].gnss_id == gnss_id) break;
+        }
+        if (mask_idx == out->nsys) {
+            trace(2, "has mt1: subset GNSS id=%d not in mask\n", gnss_id);
+            return -1;
+        }
+        nsat_master = out->mask[mask_idx].nsat;
+        if (off + nsat_master > nbits) return -1;
+        nsat_sub = 0;
+        for (j = 0; j < nsat_master; j++) {
+            int b = getbitu(msg, off + j, 1);
+            out->sub_sat_mask[i][j] = (uint8_t)b;
+            if (b) nsat_sub++;
+        }
+        off += nsat_master;
+        for (j = 0; j < nsat_sub; j++) {
+            if (off + 13 > nbits) return -1;
+            out->sub_dcc[i][j] = (int16_t)sign_extend(getbitu(msg, off, 13), 13);
+            off += 13;
+        }
+    }
+    return off;
+}
+/* mark cells selected by the cell mask and the signal mask ------------------*/
+/* Returns the next-bit offset within the cell mask after a satellite-row.   */
+static int cell_selected(const gal_has_mask_t *m, int sat_row, int sig_col)
+{
+    if (!m->cmaf) return 1;             /* no cell mask: every cell selected */
+    return getbitu(m->cell_mask, sat_row * m->nsig + sig_col, 1);
+}
+/* parse the Code Biases block (ICD section 5.2.5) ---------------------------*/
+static int parse_code_bias_block(const uint8_t *msg, int nbytes, int off,
+                                 gal_has_msg_t *out)
+{
+    int i, j, k, nbits = nbytes * 8;
+
+    if (off + 4 > nbits) return -1;
+    out->cb_vi = getbitu(msg, off, 4); off += 4;
+
+    for (i = 0; i < out->nsys; i++) {
+        const gal_has_mask_t *m = &out->mask[i];
+        for (j = 0; j < m->nsat; j++) {
+            for (k = 0; k < m->nsig; k++) {
+                if (cell_selected(m, j, k)) {
+                    if (off + 11 > nbits) return -1;
+                    out->bias[i][j][k].cb =
+                        (int16_t)sign_extend(getbitu(msg, off, 11), 11);
+                    out->bias[i][j][k].cb_valid = 1;
+                    off += 11;
+                }
+            }
+        }
+    }
+    return off;
+}
+/* parse the Phase Biases block (ICD section 5.2.6) --------------------------*/
+static int parse_phase_bias_block(const uint8_t *msg, int nbytes, int off,
+                                  gal_has_msg_t *out)
+{
+    int i, j, k, nbits = nbytes * 8;
+
+    if (off + 4 > nbits) return -1;
+    out->pb_vi = getbitu(msg, off, 4); off += 4;
+
+    for (i = 0; i < out->nsys; i++) {
+        const gal_has_mask_t *m = &out->mask[i];
+        for (j = 0; j < m->nsat; j++) {
+            for (k = 0; k < m->nsig; k++) {
+                if (cell_selected(m, j, k)) {
+                    if (off + 11 + 2 > nbits) return -1;
+                    out->bias[i][j][k].pb =
+                        (int16_t)sign_extend(getbitu(msg, off, 11), 11);
+                    off += 11;
+                    out->bias[i][j][k].pdi =
+                        (uint8_t)getbitu(msg, off, 2);
+                    off += 2;
+                    out->bias[i][j][k].pb_valid = 1;
+                }
+            }
+        }
+    }
+    return off;
+}
+/* parse a complete HAS MT1 message ------------------------------------------*/
+/* msg : pointer to the assembled message bytes (output of has_input_page). */
+/* n   : message length in octets (== ms * 53).                             */
+/* out : caller-provided gal_has_msg_t cleared and filled by this function. */
+/* Returns 0 on success, -1 on truncated input or invalid field.            */
+extern int has_parse_mt1(const uint8_t *msg, int n, gal_has_msg_t *out)
+{
+    int off;
+
+    if (!msg || !out || n < 4) {
+        trace(2, "has_parse_mt1: bad arg (n=%d)\n", n);
+        return -1;
+    }
+    memset(out, 0, sizeof(*out));
+
+    if ((off = parse_mt1_header(msg, n, &out->hdr)) < 0) return -1;
+
+    /* Blocks are decoded strictly in the order listed in ICD Table 14:     */
+    /* Mask -> Orbit -> Clock Full-Set -> Clock Subset -> Code -> Phase.     */
+    if (out->hdr.mask_flag &&
+        (off = parse_mask_block(msg, n, off, out)) < 0) {
+        trace(2, "has_parse_mt1: mask block truncated\n");
+        return -1;
+    }
+    if (out->hdr.orbit_flag &&
+        (off = parse_orbit_block(msg, n, off, out)) < 0) {
+        trace(2, "has_parse_mt1: orbit block truncated\n");
+        return -1;
+    }
+    if (out->hdr.clk_full_flag &&
+        (off = parse_clock_full_block(msg, n, off, out)) < 0) {
+        trace(2, "has_parse_mt1: clock full-set block truncated\n");
+        return -1;
+    }
+    if (out->hdr.clk_sub_flag &&
+        (off = parse_clock_subset_block(msg, n, off, out)) < 0) {
+        trace(2, "has_parse_mt1: clock subset block truncated\n");
+        return -1;
+    }
+    if (out->hdr.cb_flag &&
+        (off = parse_code_bias_block(msg, n, off, out)) < 0) {
+        trace(2, "has_parse_mt1: code bias block truncated\n");
+        return -1;
+    }
+    if (out->hdr.pb_flag &&
+        (off = parse_phase_bias_block(msg, n, off, out)) < 0) {
+        trace(2, "has_parse_mt1: phase bias block truncated\n");
+        return -1;
+    }
+    trace(3, "has_parse_mt1: ok, toh=%d mid=%d iodset=%d flags=%d%d%d%d%d%d "
+          "consumed=%d/%d bits\n",
+          out->hdr.toh, out->hdr.mask_id, out->hdr.iod_set_id,
+          out->hdr.mask_flag, out->hdr.orbit_flag, out->hdr.clk_full_flag,
+          out->hdr.clk_sub_flag, out->hdr.cb_flag, out->hdr.pb_flag,
+          off, n * 8);
+    return 0;
 }

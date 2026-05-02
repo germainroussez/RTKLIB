@@ -874,6 +874,75 @@ typedef struct {        /* HAS reception state -------------------------*/
     uint8_t msg[HAS_MAX_MS * HAS_ENC_BYTES]; /* last decoded message  */
 } gal_has_t;
 
+#define HAS_NSYS_MAX       2            /* max GNSS in MT1 (GPS+GAL)      */
+#define HAS_NSAT_MAX       40           /* max satellites per GNSS mask   */
+#define HAS_NSIG_MAX       16           /* max signals per GNSS mask      */
+#define HAS_GNSS_GPS       0            /* GNSS index for GPS (ICD 5.2.1.1)*/
+#define HAS_GNSS_GAL       2            /* GNSS index for Galileo         */
+#define HAS_NA_DR          (-4096)      /* DR raw "1000000000000" = N/A   */
+#define HAS_NA_DIT         (-2048)      /* DIT/DCT raw "100000000000"=N/A */
+#define HAS_NA_DCC         (-4096)      /* DCC raw "1000000000000" = N/A  */
+#define HAS_DCC_NOTUSE     ( 4095)      /* DCC raw "0111111111111": skip  */
+#define HAS_NA_BIAS        (-1024)      /* CB/PB raw "10000000000" = N/A  */
+
+typedef struct {        /* MT1 header (ICD Table 12) -------------------*/
+    uint16_t toh;       /* time of hour, 0..3599 s                    */
+    uint8_t mask_flag, orbit_flag, clk_full_flag, clk_sub_flag,
+            cb_flag, pb_flag;
+    uint8_t mask_id;    /* 0..31                                      */
+    uint8_t iod_set_id; /* 0..31                                      */
+} gal_has_mt1_hdr_t;
+
+typedef struct {        /* per-GNSS Mask block content (ICD Table 16) */
+    uint8_t gnss_id;    /* 0=GPS, 2=GAL, others reserved              */
+    uint8_t sat_mask[5];/* 40-bit satellite mask, MSB-first           */
+    uint16_t sig_mask;  /* 16-bit signal mask, MSB-first              */
+    uint8_t cmaf;       /* cell mask availability flag                */
+    uint8_t cell_mask[HAS_NSAT_MAX * HAS_NSIG_MAX / 8 + 1];
+                        /* cell mask, MSB-first, length nsat*nsig bits*/
+    int cell_mask_bits; /* nsat * nsig                                */
+    uint8_t nm;         /* navigation message index, 0..7             */
+    int nsat;           /* popcount(sat_mask)                         */
+    int nsig;           /* popcount(sig_mask)                         */
+    int sat_idx[HAS_NSAT_MAX];  /* SVID per row (1-based)             */
+    int sig_idx[HAS_NSIG_MAX];  /* signal index per column (0..15)    */
+} gal_has_mask_t;
+
+typedef struct {        /* per-SV orbit correction (ICD Table 25) ----*/
+    int iod;            /* IODref (8b GPS / 10b GAL)                  */
+    int16_t dr;         /* delta radial, scale 0.0025 m, two's comp   */
+    int16_t dit;        /* delta in-track, scale 0.008 m              */
+    int16_t dct;        /* delta cross-track, scale 0.008 m           */
+} gal_has_orbit_t;
+
+typedef struct {        /* per-SV per-signal bias (ICD Tables 36, 39)*/
+    int16_t cb;         /* code bias raw (scale 0.02 m)               */
+    int16_t pb;         /* phase bias raw (scale 0.01 cycles)         */
+    uint8_t pdi;        /* phase discontinuity indicator, 0..3        */
+    uint8_t cb_valid;   /* 1 if cb_flag set and CMAF cell selects it  */
+    uint8_t pb_valid;   /* 1 if pb_flag set and CMAF cell selects it  */
+} gal_has_bias_t;
+
+typedef struct {        /* parsed HAS MT1 message (ICD section 5) ----*/
+    gal_has_mt1_hdr_t hdr;
+    int nsys;                                   /* number of GNSS    */
+    gal_has_mask_t mask[HAS_NSYS_MAX];
+    int orbit_vi;                               /* validity index    */
+    gal_has_orbit_t orbit[HAS_NSYS_MAX][HAS_NSAT_MAX];
+    int clk_full_vi;
+    uint8_t dcm[HAS_NSYS_MAX];                  /* multiplier 1..4   */
+    int16_t dcc[HAS_NSYS_MAX][HAS_NSAT_MAX];    /* delta clock raw   */
+    int clk_sub_vi;
+    int nsys_sub;
+    uint8_t sub_gnss_id[HAS_NSYS_MAX];
+    uint8_t sub_dcm[HAS_NSYS_MAX];
+    uint8_t sub_sat_mask[HAS_NSYS_MAX][HAS_NSAT_MAX];
+    int16_t sub_dcc[HAS_NSYS_MAX][HAS_NSAT_MAX];
+    int cb_vi;
+    int pb_vi;
+    gal_has_bias_t bias[HAS_NSYS_MAX][HAS_NSAT_MAX][HAS_NSIG_MAX];
+} gal_has_msg_t;
+
 typedef struct {        /* navigation data type */
     int n,nmax;         /* number of broadcast ephemeris */
     int ng,ngmax;       /* number of glonass ephemeris */
@@ -1778,6 +1847,9 @@ EXPORT int has_rs_decode(const uint8_t *enc, const uint8_t *pids, int k,
 /* Galileo HAS C/NAV page parser and reassembly ------------------------------*/
 EXPORT void has_init      (gal_has_t *has);
 EXPORT int  has_input_page(gal_has_t *has, gtime_t time, const uint8_t *page);
+
+/* Galileo HAS MT1 message parser --------------------------------------------*/
+EXPORT int  has_parse_mt1 (const uint8_t *msg, int n, gal_has_msg_t *out);
 
 /* solution functions --------------------------------------------------------*/
 EXPORT void initsolbuf(solbuf_t *solbuf, int cyclic, int nmax);
