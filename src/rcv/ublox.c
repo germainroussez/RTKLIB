@@ -1043,6 +1043,30 @@ static int decode_fnav(raw_t *raw, int sat, int off)
     raw->ephset = 1;  // 1:F/NAV
     return 2;
 }
+/* decode Galileo E6B C/NAV page (Galileo HAS carrier) -----------------------*/
+/* Extracts the 16 nav data words (492 useful bits + framing) from a UBX
+   RXM-SFRBX message tagged gnssId=2, sigId=8. The decoded page is not yet
+   stored or reassembled - downstream HAS Reed-Solomon and MT1 decoding will
+   be added in subsequent phases. For now we trace the page to validate
+   bit-level extraction against the receiver feed. */
+static int decode_gal_e6b(raw_t *raw, int sat, int off)
+{
+    uint8_t page[64];
+    int i;
+
+    if (raw->len < 64 + off) {
+        trace(2,"ubx rxmsfrbx e6b length error: sat=%d len=%d\n", sat, raw->len);
+        return -1;
+    }
+    /* pack 16 U4 words MSB-first to preserve over-the-air transmission order */
+    for (i = 0; i < 16; i++) {
+        setbitu(page, 32 * i, 32, U4(raw->buff + 6 + off + 4 * i));
+    }
+    trace(3,"ubx rxmsfrbx e6b: sat=%d bytes=%02X%02X%02X%02X%02X%02X%02X%02X...\n",
+          sat, page[0], page[1], page[2], page[3],
+          page[4], page[5], page[6], page[7]);
+    return 0;
+}
 /* decode BDS navigation data ------------------------------------------------*/
 static int decode_cnav(raw_t *raw, int sat, int off)
 {
@@ -1218,9 +1242,8 @@ static int decode_rxmsfrbx(raw_t *raw)
         case SYS_QZS: return decode_nav (raw,sat,8);
         case SYS_GAL:
           if (U1(p + 2) == 8) {
-            // Signal E6B, E6 CNAV.
-            trace(3, "ubx rxmsfrbx Galileo E6 CNAV unsupported: sys=%d prn=%3d sigid=%d\n", U1(p), U1(p + 1), U1(p + 2));
-            return 0;
+            /* Galileo E6B C/NAV - HAS data carrier */
+            return decode_gal_e6b(raw, sat, 8);
           }
           if (U1(p + 2) == 3) {
             // Signal E5a, F/NAV
