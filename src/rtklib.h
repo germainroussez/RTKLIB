@@ -842,6 +842,38 @@ typedef struct {        /* SSR correction type */
     uint8_t update;     /* update flag (0:no update,1:update) */
 } ssr_t;
 
+#define HAS_PAGE_BYTES     56           /* HAS Page = 24-bit hdr + 53-octet enc */
+#define HAS_HDR_BYTES      3            /* HAS Page Header = 24 bits      */
+#define HAS_ENC_BYTES      53           /* HAS Encoded Page = 424 bits    */
+#define HAS_DUMMY_HDR      0xAF3BC3u    /* HAS Dummy Page header value    */
+#define HAS_MAX_MS         32           /* max pages per HAS message      */
+#define HAS_MAX_CHAN       16           /* concurrent (MT,MID) channels   */
+#define HAS_TIMEOUT        150.0        /* page reassembly timeout (sec)  */
+
+typedef struct {        /* HAS page header (ICD Table 7) ----------------*/
+    uint8_t hass;       /* HAS status (0:test,1:operational,2:reserved,3:do not use) */
+    uint8_t mt;         /* message type (1: MT1, only valid value)      */
+    uint8_t mid;        /* message ID (0..31)                           */
+    uint8_t ms;         /* message size in pages (1..32, raw 0..31 + 1) */
+    uint8_t pid;        /* page ID (1..255)                             */
+} gal_has_hdr_t;
+
+typedef struct {        /* per-(MT,MID) HAS page accumulator -------------*/
+    gtime_t t0;         /* time of the first received page              */
+    int mt, mid, ms;    /* metadata shared across the pages of this msg */
+    int npage;          /* number of distinct pages received so far     */
+    uint8_t pids[HAS_MAX_MS]; /* received PID list (deduplicated)       */
+    uint8_t pages[HAS_MAX_MS][HAS_ENC_BYTES]; /* encoded page payloads  */
+} gal_has_chan_t;
+
+typedef struct {        /* HAS reception state -------------------------*/
+    gal_has_chan_t chan[HAS_MAX_CHAN]; /* per-MID page accumulators    */
+    int mt, mid, ms;    /* metadata of the last assembled message      */
+    gtime_t t;          /* time of the last assembled message          */
+    int n;              /* size of msg[] in octets, MS * 53            */
+    uint8_t msg[HAS_MAX_MS * HAS_ENC_BYTES]; /* last decoded message  */
+} gal_has_t;
+
 typedef struct {        /* navigation data type */
     int n,nmax;         /* number of broadcast ephemeris */
     int ng,ngmax;       /* number of glonass ephemeris */
@@ -877,6 +909,7 @@ typedef struct {        /* navigation data type */
     sbsion_t sbsion[MAXBAND+1]; /* SBAS ionosphere corrections */
     dgps_t dgps[MAXSAT]; /* DGPS corrections */
     ssr_t ssr[MAXSAT];  /* SSR corrections */
+    gal_has_t has;      /* Galileo HAS reception state */
 } nav_t;
 
 typedef struct {        /* station parameter type */
@@ -1741,6 +1774,10 @@ EXPORT int gen_rtcm3   (rtcm_t *rtcm, int type, int subtype, int sync);
 /* Galileo HAS Reed-Solomon erasure decoder (HPVRS) --------------------------*/
 EXPORT int has_rs_decode(const uint8_t *enc, const uint8_t *pids, int k,
                          uint8_t *dec);
+
+/* Galileo HAS C/NAV page parser and reassembly ------------------------------*/
+EXPORT void has_init      (gal_has_t *has);
+EXPORT int  has_input_page(gal_has_t *has, gtime_t time, const uint8_t *page);
 
 /* solution functions --------------------------------------------------------*/
 EXPORT void initsolbuf(solbuf_t *solbuf, int cyclic, int nmax);

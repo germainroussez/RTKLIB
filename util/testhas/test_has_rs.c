@@ -15,7 +15,8 @@
 *         Annex C (Reed-Solomon Decoding Example).
 *
 * usage :
-*     cc -O2 -I../../src ../../src/has.c test_has_rs.c -o test_has_rs
+*     cc -O2 -I../../src ../../src/has.c ../../src/rtkcmn.c \
+*        test_has_rs.c -o test_has_rs
 *     ./test_has_rs
 *
 * version : $Revision:$ $Date:$
@@ -28,7 +29,8 @@
 /* Prototype copy: rtklib.h is intentionally not pulled in so this driver
  * remains a single-file C program. has.c is built without -DTRACE so its
  * trace() calls expand to no-ops, which keeps the test free of any link
- * dependency on src/trace.c. */
+ * dependency on src/trace.c. rtkcmn.c is linked alongside to satisfy the
+ * bit-stream and time helpers used by the page-parser and MT1 sections. */
 extern int has_rs_decode(const uint8_t *enc, const uint8_t *pids, int k,
                          uint8_t *dec);
 

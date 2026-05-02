@@ -4,10 +4,11 @@
 *          Copyright (C) 2026 by G.ROUSSEZ, All rights reserved.
 *
 * description :
-*     Reed-Solomon (255,32,224) erasure decoder for the outer-layer coding
-*     scheme of Galileo High Accuracy Service (HAS) messages, as specified
-*     in section 6 of the HAS Signal-In-Space Interface Control Document.
+*     Galileo High Accuracy Service (HAS) decoder. The module is organised
+*     in clearly delimited sections that mirror the layers defined in the
+*     HAS Signal-In-Space Interface Control Document.
 *
+*     === Reed-Solomon erasure decoder (ICD section 6) ===
 *     A HAS message of size MS in {1,...,32} pages of 53 octets each is
 *     encoded into N=255 encoded pages by independently encoding each of
 *     the J=53 vertical octet columns through a systematic RS(255,32) code
@@ -15,12 +16,23 @@
 *     K=MS valid encoded pages with distinct PIDs by inverting, once per
 *     message, a K-by-K sub-matrix D of the systematic generator matrix G
 *     (rows = received PIDs minus one, columns = first K) and applying
-*     m_j = D^-1 . w_j for each of the 53 vertical columns.
+*     m_j = D^-1 . w_j for each of the 53 vertical columns. This section
+*     embeds three precomputed constant tables generated offline by
+*     util/genhas/genhas.c, which also cross-checks the resulting 15-by-15
+*     D matrix against the values printed in HAS SIS ICD Annex C before
+*     emitting the tables.
 *
-*     This file embeds three precomputed constant tables generated offline
-*     by util/genhas/genhas.c. The generator tool also performs a cross-
-*     check against the 15-by-15 D matrix printed in HAS SIS ICD Annex C
-*     before emitting the tables.
+*     === HAS Page parser and multi-page reassembly (ICD sections 2.4, 6.4) ===
+*     Per ICD section 2.4 a HAS Page is exactly 56 octets: a 24-bit HAS Page
+*     Header byte-aligned at byte 0 and a 53-octet HAS Encoded Page payload
+*     at byte 3. The parser is agnostic of the receiver-side transport (UBX
+*     SFRBX, SBF GalRawCNAV, etc.); the receiver decoder is responsible for
+*     stripping the C/NAV signal layer (Reserved field, CRC, dummy detection)
+*     and presenting the 56-octet HAS Page to the layer below. A small state
+*     machine accumulates pages with the same MT/MID until MS distinct PIDs
+*     have been received, then runs the Reed-Solomon erasure decoder above
+*     and stores the resulting message into nav.has.msg. Channels timing out
+*     past HAS_TIMEOUT seconds are dropped.
 *
 * references :
 *     [1] European GNSS Service Centre, Galileo High Accuracy Service
@@ -487,3 +499,161 @@ extern int has_rs_decode(const uint8_t *enc, const uint8_t *pids, int k,
     return 0;
 }
 
+
+/* ===========================================================================
+ *  HAS Page parser and multi-page reassembly (HAS SIS ICD sections 2.4, 6.4)
+ * =========================================================================*/
+
+/* clear all HAS reception state ---------------------------------------------*/
+extern void has_init(gal_has_t *has)
+{
+    if (has) memset(has, 0, sizeof(*has));
+}
+/* extract the HAS Page Header from a 56-octet HAS Page ----------------------*/
+/* The HAS Page Header occupies bits 0..23 of the HAS Page (bytes 0..2),     */
+/* MSB first, with the field layout defined in ICD Table 7.                   */
+static void parse_header(const uint8_t *page, gal_has_hdr_t *h)
+{
+    h->hass = (uint8_t)getbitu(page, 0 , 2);
+    /* bits 2..3 are reserved */
+    h->mt   = (uint8_t)getbitu(page, 4 , 2);
+    h->mid  = (uint8_t)getbitu(page, 6 , 5);
+    h->ms   = (uint8_t)getbitu(page, 11, 5) + 1;    /* "0"=1 .. "31"=32 */
+    h->pid  = (uint8_t)getbitu(page, 16, 8);
+}
+/* test whether the page is a HAS Dummy Page (header == 0xAF3BC3) ------------*/
+static int is_dummy(const uint8_t *page)
+{
+    return page[0] == 0xAF && page[1] == 0x3B && page[2] == 0xC3;
+}
+/* discard channels older than HAS_TIMEOUT seconds ---------------------------*/
+static void garbage_collect(gal_has_t *has, gtime_t time)
+{
+    int i;
+    if (time.time == 0) return;         /* receiver time not yet known */
+    for (i = 0; i < HAS_MAX_CHAN; i++) {
+        if (has->chan[i].npage == 0) continue;
+        if (timediff(time, has->chan[i].t0) > HAS_TIMEOUT) {
+            trace(3, "has: drop chan %d mt=%d mid=%d (timeout %.0fs)\n",
+                  i, has->chan[i].mt, has->chan[i].mid, HAS_TIMEOUT);
+            memset(&has->chan[i], 0, sizeof(gal_has_chan_t));
+        }
+    }
+}
+/* find or allocate the channel for a given (mt,mid,ms) ----------------------*/
+/* Returns the channel index in 0..HAS_MAX_CHAN-1, or -1 if no slot is free. */
+/* If the existing channel has a different ms, it is reset (rollover).       */
+static int get_channel(gal_has_t *has, gtime_t time,
+                       int mt, int mid, int ms)
+{
+    int i, free_idx = -1;
+
+    for (i = 0; i < HAS_MAX_CHAN; i++) {
+        if (has->chan[i].npage > 0 &&
+            has->chan[i].mt == mt && has->chan[i].mid == mid) {
+            if (has->chan[i].ms != ms) {
+                trace(3, "has: ms changed for mt=%d mid=%d (was=%d new=%d), "
+                      "reset accumulator\n",
+                      mt, mid, has->chan[i].ms, ms);
+                memset(&has->chan[i], 0, sizeof(gal_has_chan_t));
+                has->chan[i].t0 = time;
+                has->chan[i].mt = mt;
+                has->chan[i].mid = mid;
+                has->chan[i].ms = ms;
+            }
+            return i;
+        }
+        if (free_idx < 0 && has->chan[i].npage == 0) free_idx = i;
+    }
+    if (free_idx < 0) {
+        trace(2, "has: no free channel for mt=%d mid=%d\n", mt, mid);
+        return -1;
+    }
+    has->chan[free_idx].t0 = time;
+    has->chan[free_idx].mt = mt;
+    has->chan[free_idx].mid = mid;
+    has->chan[free_idx].ms = ms;
+    return free_idx;
+}
+/* try to assemble and decode the HAS message held in channel idx -----------*/
+/* Returns 1 if the message was completed and decoded into has->msg, else 0. */
+static int try_decode(gal_has_t *has, int idx)
+{
+    gal_has_chan_t *c = &has->chan[idx];
+    uint8_t enc[HAS_MAX_MS * HAS_ENC_BYTES];
+    int i;
+
+    if (c->npage < c->ms) return 0;     /* not enough pages yet */
+
+    for (i = 0; i < c->ms; i++) {
+        memcpy(enc + i * HAS_ENC_BYTES, c->pages[i], HAS_ENC_BYTES);
+    }
+    if (has_rs_decode(enc, c->pids, c->ms, has->msg) != 0) {
+        trace(2, "has: RS decode failed for mt=%d mid=%d ms=%d\n",
+              c->mt, c->mid, c->ms);
+        memset(c, 0, sizeof(*c));
+        return 0;
+    }
+    has->mt  = c->mt;
+    has->mid = c->mid;
+    has->ms  = c->ms;
+    has->t   = c->t0;
+    has->n   = c->ms * HAS_ENC_BYTES;
+    trace(3, "has: decoded mt=%d mid=%d ms=%d (%d octets)\n",
+          has->mt, has->mid, has->ms, has->n);
+
+    /* Free the channel; receivers may immediately start sending the next    */
+    /* message with the same MID (after rollover) so we want a clean slot.   */
+    memset(c, 0, sizeof(*c));
+    return 1;
+}
+/* input one HAS Page (56 octets) extracted by the receiver decoder ----------*/
+/* time : reception time, used for timeout housekeeping (can be 0 initially) */
+/* page : 56-octet HAS Page (24-bit header at bytes 0..2, 53-octet encoded   */
+/*        payload at bytes 3..55), pre-validated by the caller.              */
+/* Returns 1 if a HAS message was completed and decoded into has->msg.       */
+extern int has_input_page(gal_has_t *has, gtime_t time, const uint8_t *page)
+{
+    gal_has_hdr_t hdr;
+    int idx, i;
+
+    if (!has || !page) return 0;
+
+    garbage_collect(has, time);
+
+    if (is_dummy(page)) {
+        trace(4, "has: dummy page\n");
+        return 0;
+    }
+    parse_header(page, &hdr);
+
+    if (hdr.mt != 1) {
+        trace(2, "has: unexpected mt=%d (only mt=1 defined in v1.0 ICD)\n",
+              hdr.mt);
+        return 0;
+    }
+    if (hdr.pid < 1) {
+        trace(2, "has: invalid pid=%d (reserved)\n", hdr.pid);
+        return 0;
+    }
+    if (hdr.ms < 1 || hdr.ms > HAS_MAX_MS) {
+        trace(2, "has: invalid ms=%d\n", hdr.ms);
+        return 0;
+    }
+    trace(4, "has: page hass=%d mt=%d mid=%d ms=%d pid=%d\n",
+          hdr.hass, hdr.mt, hdr.mid, hdr.ms, hdr.pid);
+
+    idx = get_channel(has, time, hdr.mt, hdr.mid, hdr.ms);
+    if (idx < 0) return 0;
+
+    /* Deduplicate by PID: ignore retransmissions of an already-stored page. */
+    for (i = 0; i < has->chan[idx].npage; i++) {
+        if (has->chan[idx].pids[i] == hdr.pid) return 0;
+    }
+    has->chan[idx].pids[has->chan[idx].npage] = hdr.pid;
+    memcpy(has->chan[idx].pages[has->chan[idx].npage], page + HAS_HDR_BYTES,
+           HAS_ENC_BYTES);
+    has->chan[idx].npage++;
+
+    return try_decode(has, idx);
+}

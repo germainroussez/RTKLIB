@@ -1044,28 +1044,64 @@ static int decode_fnav(raw_t *raw, int sat, int off)
     return 2;
 }
 /* decode Galileo E6B C/NAV page (Galileo HAS carrier) -----------------------*/
-/* Extracts the 16 nav data words (492 useful bits + framing) from a UBX
-   RXM-SFRBX message tagged gnssId=2, sigId=8. The decoded page is not yet
-   stored or reassembled - downstream HAS Reed-Solomon and MT1 decoding will
-   be added in subsequent phases. For now we trace the page to validate
-   bit-level extraction against the receiver feed. */
+/* Unpacks one C/NAV page from a UBX-RXM-SFRBX message tagged gnssId=2,
+   sigId=8 and forwards the contained HAS Page to the HAS layer.
+
+   The 16 nav data words returned by the receiver pack the Viterbi-decoded
+   492-bit C/NAV layout MSB-first into a 512-bit buffer with the following
+   bit allocation (HAS SIS ICD section 2.3, 2.4):
+
+       bit 0   .. 13   14 reserved bits
+       bit 14  .. 37   24-bit HAS Page Header (HASS, MT, MID, MS, PID)
+       bit 38  .. 461  424-bit HAS Encoded Page (53 octets)
+       bit 462 .. 485  24-bit CRC-24 over bits 0..461
+       bit 486 .. 511  unused
+
+   The C/NAV CRC polynomial (ICD Eq.1) expands to the standard CRC-24Q used
+   elsewhere in RTKLIB, so rtk_crc24q() is reused after byte-aligning the
+   462-bit payload by prepending two leading zero bits (same trick as
+   sbas.c::sbsdecodemsg()). The 56-octet HAS Page is then re-extracted into
+   a byte-aligned buffer and forwarded to has_input_page(), which is itself
+   transport-agnostic.                                                       */
 static int decode_gal_e6b(raw_t *raw, int sat, int off)
 {
-    uint8_t page[64];
+    uint8_t cnav[64], covered[58], has_page[HAS_PAGE_BYTES];
+    uint32_t crc, expected;
     int i;
 
     if (raw->len < 64 + off) {
-        trace(2,"ubx rxmsfrbx e6b length error: sat=%d len=%d\n", sat, raw->len);
+        trace(2, "ubx rxmsfrbx e6b length error: sat=%d len=%d\n",
+              sat, raw->len);
         return -1;
     }
     /* pack 16 U4 words MSB-first to preserve over-the-air transmission order */
     for (i = 0; i < 16; i++) {
-        setbitu(page, 32 * i, 32, U4(raw->buff + 6 + off + 4 * i));
+        setbitu(cnav, 32 * i, 32, U4(raw->buff + 6 + off + 4 * i));
     }
-    trace(3,"ubx rxmsfrbx e6b: sat=%d bytes=%02X%02X%02X%02X%02X%02X%02X%02X...\n",
-          sat, page[0], page[1], page[2], page[3],
-          page[4], page[5], page[6], page[7]);
-    return 0;
+    trace(4, "ubx rxmsfrbx e6b: sat=%d bytes=%02X%02X%02X%02X%02X%02X%02X%02X...\n",
+          sat, cnav[0], cnav[1], cnav[2], cnav[3],
+          cnav[4], cnav[5], cnav[6], cnav[7]);
+
+    /* CRC-24Q over the 462 protected bits, byte-aligned by prepending 2 */
+    /* leading zero bits (rtk_crc24q starts with crc=0 so the prepended  */
+    /* zeros leave the running CRC unchanged).                           */
+    memset(covered, 0, sizeof(covered));
+    for (i = 0; i < 462; i++) {
+        if (getbitu(cnav, i, 1)) setbitu(covered, 2 + i, 1, 1);
+    }
+    crc      = rtk_crc24q(covered, 58) & 0xFFFFFF;
+    expected = getbitu(cnav, 462, 24);
+    if (crc != expected) {
+        trace(2, "ubx rxmsfrbx e6b: CRC mismatch, sat=%d (got=%06X exp=%06X)\n",
+              sat, crc, expected);
+        return 0;
+    }
+    /* Extract the 56-octet HAS Page (bits 14..461 of the C/NAV layout) into */
+    /* a byte-aligned buffer for the transport-agnostic HAS layer.           */
+    for (i = 0; i < HAS_PAGE_BYTES; i++) {
+        has_page[i] = (uint8_t)getbitu(cnav, 14 + i * 8, 8);
+    }
+    return has_input_page(&raw->nav.has, raw->time, has_page);
 }
 /* decode BDS navigation data ------------------------------------------------*/
 static int decode_cnav(raw_t *raw, int sat, int off)
