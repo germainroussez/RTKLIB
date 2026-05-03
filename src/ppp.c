@@ -425,7 +425,7 @@ static void corr_meas(const obsd_t *obs, const nav_t *nav, const double *azel,
         L[i]=obs->L[i]*CLIGHT/freq[i]-dants[i]-dantr[i]-phw*CLIGHT/freq[i];
         P[i]=obs->P[i]               -dants[i]-dantr[i];
         double P_nobias = P[i];
-        if (opt->sateph==EPHOPT_SSRAPC||opt->sateph==EPHOPT_SSRCOM) {
+        if (opt->sateph==EPHOPT_SSRAPC||opt->sateph==EPHOPT_SSRCOM||opt->sateph==EPHOPT_SSRHAS) {
             /* apply SSR correction */
             P[i]-=nav->ssr[obs->sat-1].cbias[obs->code[i]-1];
         }

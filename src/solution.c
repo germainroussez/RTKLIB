@@ -1560,7 +1560,7 @@ extern int outprcopts(uint8_t *buff, const prcopt_t *opt)
     };
     const char *s6[]={
         "Broadcast","Precise","Broadcast+SBAS","Broadcast+SSR APC",
-        "Broadcast+SSR CoM","Precise (CoM)","",""
+        "Broadcast+SSR CoM","QZSS LEX","Broadcast+SSR HAS",""
     };
     const char *s7[]={
         "GPS","GLONASS","Galileo","QZSS","BDS","NavIC","SBAS","","",""
