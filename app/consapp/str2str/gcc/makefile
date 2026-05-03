@@ -16,7 +16,7 @@ str2str    : str2str.o stream.o rtkcmn.o trace.o solution.o sbas.o geoid.o
 str2str    : rcvraw.o novatel.o ublox.o crescent.o skytraq.o javad.o
 str2str    : nvs.o binex.o rt17.o rtcm.o rtcm2.o rtcm3.o rtcm3e.o preceph.o streamsvr.o
 str2str    : septentrio.o swiftnav.o unicore.o
-str2str    : sofa.o
+str2str    : sofa.o has.o
 
 str2str.o  : ../str2str.c
 	$(CC) -c $(CFLAGS) ../str2str.c
@@ -72,6 +72,8 @@ unicore.o: $(SRC)/rcv/unicore.c
 	$(CC) -c $(CFLAGS) $(SRC)/rcv/unicore.c
 sofa.o: $(SRC)/sofa.c
 	$(CC) -c $(CFLAGS) $(SRC)/sofa.c
+has.o      : $(SRC)/has.c
+	$(CC) -c $(CFLAGS) $(SRC)/has.c
 
 str2str.o  : $(SRC)/rtklib.h
 stream.o   : $(SRC)/rtklib.h
@@ -99,6 +101,7 @@ preceph.o  : $(SRC)/rtklib.h
 septentrio.o: $(SRC)/rtklib.h
 swiftnav.o  : $(SRC)/rtklib.h
 unicore.o  : $(SRC)/rtklib.h
+has.o      : $(SRC)/rtklib.h
 
 install:
 	cp str2str $(BINDIR)

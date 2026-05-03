@@ -18,7 +18,7 @@ convbin    : convbin.o rtkcmn.o trace.o rinex.o sbas.o preceph.o rcvraw.o convrn
 convbin    : rtcm.o rtcm2.o rtcm3.o rtcm3e.o pntpos.o ephemeris.o ionex.o
 convbin    : novatel.o ublox.o crescent.o skytraq.o javad.o nvs.o
 convbin    : binex.o rt17.o septentrio.o swiftnav.o unicore.o
-convbin    : sofa.o
+convbin    : sofa.o has.o
 
 convbin.o  : ../convbin.c
 	$(CC) -c $(CFLAGS) ../convbin.c
@@ -76,6 +76,8 @@ unicore.o: $(SRC)/rcv/unicore.c
 	$(CC) -c $(CFLAGS) $(SRC)/rcv/unicore.c
 sofa.o     : $(SRC)/sofa.c
 	$(CC) -c $(CFLAGS) $(SRC)/sofa.c
+has.o      : $(SRC)/has.c
+	$(CC) -c $(CFLAGS) $(SRC)/has.c
 
 convbin.o  : $(SRC)/rtklib.h
 rtkcmn.o   : $(SRC)/rtklib.h
@@ -104,6 +106,7 @@ rt17.o     : $(SRC)/rtklib.h
 septentrio.o: $(SRC)/rtklib.h
 swiftnav.o : $(SRC)/rtklib.h
 unciore.o  : $(SRC)/rtklib.h
+has.o      : $(SRC)/rtklib.h
 
 DATDIR = ../../../test/data/rcvraw
 

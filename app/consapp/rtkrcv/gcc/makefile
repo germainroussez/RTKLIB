@@ -16,7 +16,7 @@ rtkrcv     : sbas.o stream.o rcvraw.o rtcm.o preceph.o options.o pntpos.o ppp.o 
 rtkrcv     : novatel.o ublox.o crescent.o skytraq.o javad.o nvs.o binex.o
 rtkrcv     : rt17.o ephemeris.o rinex.o ionex.o rtcm2.o rtcm3.o rtcm3e.o
 rtkrcv     : tides.o septentrio.o swiftnav.o unicore.o
-rtkrcv     : sofa.o
+rtkrcv     : sofa.o has.o
 
 
 rtkrcv.o   : ../rtkrcv.c
@@ -93,6 +93,8 @@ unicore.o: $(SRC)/rcv/unicore.c
 	$(CC) -c $(CFLAGS) $(SRC)/rcv/unicore.c
 sofa.o     : $(SRC)/sofa.c
 	$(CC) -c $(CFLAGS) $(SRC)/sofa.c
+has.o      : $(SRC)/has.c
+	$(CC) -c $(CFLAGS) $(SRC)/has.c
 
 rtkrcv.o   : $(SRC)/rtklib.h ../vt.h
 vt.o       : ../vt.h
@@ -130,6 +132,7 @@ ephemeris.o: $(SRC)/rtklib.h
 rinex.o    : $(SRC)/rtklib.h
 ionex.o    : $(SRC)/rtklib.h
 tides.o    : $(SRC)/rtklib.h
+has.o      : $(SRC)/rtklib.h
 
 install:
 	cp rtkrcv $(BINDIR)
