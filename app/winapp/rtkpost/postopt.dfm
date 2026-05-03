@@ -293,7 +293,8 @@ object OptDialog: TOptDialog
           'Broadcast+SBAS'
           'Broadcast+SSR APC'
           'Broadcast+SSR CoM'
-          'QZSS LEX')
+          'QZSS LEX'
+          'Broadcast+SSR HAS')
       end
       object PosOpt1: TCheckBox
         Left = 24

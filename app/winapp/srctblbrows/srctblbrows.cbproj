@@ -254,6 +254,9 @@
         <CppCompile Include="..\..\..\src\geoid.c">
             <BuildOrder>20</BuildOrder>
         </CppCompile>
+        <CppCompile Include="..\..\..\src\has.c">
+            <BuildOrder>62</BuildOrder>
+        </CppCompile>
         <CppCompile Include="..\..\..\src\rcvraw.c">
             <BuildOrder>25</BuildOrder>
         </CppCompile>
@@ -492,6 +495,7 @@
                     </Platform>
                 </DeployFile>
                 <DeployFile LocalName="..\..\..\src\geoid.c" Configuration="Release" Class="ProjectFile"/>
+                <DeployFile LocalName="..\..\..\src\has.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\preceph.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\rcv\binex.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\rcv\cmr.c" Configuration="Release" Class="ProjectFile"/>

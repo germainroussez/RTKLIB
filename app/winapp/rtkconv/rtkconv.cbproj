@@ -290,6 +290,9 @@
         <CppCompile Include="..\..\..\src\ephemeris.c">
             <BuildOrder>25</BuildOrder>
         </CppCompile>
+        <CppCompile Include="..\..\..\src\has.c">
+            <BuildOrder>62</BuildOrder>
+        </CppCompile>
         <CppCompile Include="..\..\..\src\ionex.c">
             <BuildOrder>26</BuildOrder>
         </CppCompile>
@@ -566,6 +569,8 @@
                 <DeployFile LocalName="..\..\..\src\convrnx.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\ephemeris.c" Configuration="Debug" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\ephemeris.c" Configuration="Release" Class="ProjectFile"/>
+                <DeployFile LocalName="..\..\..\src\has.c" Configuration="Debug" Class="ProjectFile"/>
+                <DeployFile LocalName="..\..\..\src\has.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\ionex.c" Configuration="Debug" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\ionex.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\pntpos.c" Configuration="Debug" Class="ProjectFile"/>

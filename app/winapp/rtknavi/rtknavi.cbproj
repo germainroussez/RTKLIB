@@ -376,6 +376,9 @@
             <BuildOrder>8</BuildOrder>
             <BuildOrder>25</BuildOrder>
         </CppCompile>
+        <CppCompile Include="..\..\..\src\has.c">
+            <BuildOrder>62</BuildOrder>
+        </CppCompile>
         <CppCompile Include="..\..\..\src\ionex.c">
             <BuildOrder>41</BuildOrder>
             <BuildOrder>22</BuildOrder>
@@ -721,6 +724,8 @@
                 <DeployFile LocalName="..\..\..\src\ephemeris.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\geoid.c" Configuration="Debug" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\geoid.c" Configuration="Release" Class="ProjectFile"/>
+                <DeployFile LocalName="..\..\..\src\has.c" Configuration="Debug" Class="ProjectFile"/>
+                <DeployFile LocalName="..\..\..\src\has.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\ionex.c" Configuration="Debug" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\ionex.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\lambda.c" Configuration="Debug" Class="ProjectFile"/>

@@ -409,6 +409,9 @@
         <CppCompile Include="..\..\..\src\geoid.c">
             <BuildOrder>45</BuildOrder>
         </CppCompile>
+        <CppCompile Include="..\..\..\src\has.c">
+            <BuildOrder>62</BuildOrder>
+        </CppCompile>
         <CppCompile Include="..\..\..\src\gis.c">
             <BuildOrder>46</BuildOrder>
         </CppCompile>
@@ -701,6 +704,8 @@
                 <DeployFile LocalName="..\..\..\src\ephemeris.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\geoid.c" Configuration="Debug" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\geoid.c" Configuration="Release" Class="ProjectFile"/>
+                <DeployFile LocalName="..\..\..\src\has.c" Configuration="Debug" Class="ProjectFile"/>
+                <DeployFile LocalName="..\..\..\src\has.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\gis.c" Configuration="Debug" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\gis.c" Configuration="Release" Class="ProjectFile"/>
                 <DeployFile LocalName="..\..\..\src\ionex.c" Configuration="Debug" Class="ProjectFile"/>
