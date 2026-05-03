@@ -46,7 +46,7 @@
 *     === SSR adapter (ICD section 7) ===
 *     Maps a parsed gal_has_msg_t onto nav.ssr[sat] so that the existing
 *     RTKLIB SSR consumers (ephemeris.c::satpos_ssr, ppp.c, postpos.c) can
-*     apply HAS corrections through the EPHOPT_SSRAPC code path. The
+*     apply HAS corrections through the EPHOPT_SSRHAS code path. The
 *     adapter resolves HAS signal indexes (ICD Table 20) to RTKLIB CODE_*
 *     identifiers, converts HAS satellite indexes (ICD Table 19) to RTKLIB
 *     satellite numbers via satno(), translates Validity Interval indexes
@@ -636,16 +636,21 @@ static int try_decode(gal_has_t *has, int idx)
     return 1;
 }
 /* input one HAS Page (56 octets) extracted by the receiver decoder ----------*/
+/* nav  : navigation data; the page accumulator and assembled MT1 message    */
+/*        are held in nav->has, and a successfully reassembled MT1 message   */
+/*        is dispatched into nav->ssr[] on the fly via has_apply_corrections.*/
 /* time : reception time, used for timeout housekeeping (can be 0 initially) */
 /* page : 56-octet HAS Page (24-bit header at bytes 0..2, 53-octet encoded   */
 /*        payload at bytes 3..55), pre-validated by the caller.              */
-/* Returns 1 if a HAS message was completed and decoded into has->msg.       */
-extern int has_input_page(gal_has_t *has, gtime_t time, const uint8_t *page)
+/* Returns 1 if a HAS message was completed and decoded into nav->has.msg.   */
+extern int has_input_page(nav_t *nav, gtime_t time, const uint8_t *page)
 {
+    gal_has_t *has;
     gal_has_hdr_t hdr;
-    int idx, i;
+    int idx, i, decoded;
 
-    if (!has || !page) return 0;
+    if (!nav || !page) return 0;
+    has = &nav->has;
 
     garbage_collect(has, time);
 
@@ -683,7 +688,9 @@ extern int has_input_page(gal_has_t *has, gtime_t time, const uint8_t *page)
            HAS_ENC_BYTES);
     has->chan[idx].npage++;
 
-    return try_decode(has, idx);
+    decoded = try_decode(has, idx);
+    if (decoded == 1) has_apply_corrections(nav);
+    return decoded;
 }
 
 /* ===========================================================================

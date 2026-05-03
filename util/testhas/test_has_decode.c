@@ -182,33 +182,33 @@ static void build_page(int hass, int mt, int mid, int ms, int pid,
 /* Test 1: parse the ICD Annex C page (single page, after C/NAV-to-HAS shift)*/
 static int test_annexc_page(void)
 {
-    gal_has_t has;
+    nav_t nav = {0};
     gtime_t t = {0};
     uint8_t has_page[HAS_PAGE_BYTES];
     int ret;
 
-    has_init(&has);
+    has_init(&nav.has);
     cnav_to_has_page(annexc_cnav, has_page);
-    ret = has_input_page(&has, t, has_page);
+    ret = has_input_page(&nav, t, has_page);
     if (ret != 0) {
         fprintf(stderr, "test1: expected 0 (single page, ms=15), got %d\n",
                 ret);
         return 1;
     }
-    if (has.chan[0].npage != 1 || has.chan[0].mt != 1 ||
-        has.chan[0].mid != 15  || has.chan[0].ms != 15 ||
-        has.chan[0].pids[0] != 55) {
+    if (nav.has.chan[0].npage != 1 || nav.has.chan[0].mt != 1 ||
+        nav.has.chan[0].mid != 15  || nav.has.chan[0].ms != 15 ||
+        nav.has.chan[0].pids[0] != 55) {
         fprintf(stderr, "test1: wrong header parse: npage=%d mt=%d mid=%d "
                 "ms=%d pid=%d\n",
-                has.chan[0].npage, has.chan[0].mt, has.chan[0].mid,
-                has.chan[0].ms, has.chan[0].pids[0]);
+                nav.has.chan[0].npage, nav.has.chan[0].mt, nav.has.chan[0].mid,
+                nav.has.chan[0].ms, nav.has.chan[0].pids[0]);
         return 1;
     }
     /* The first byte of the encoded payload must equal the first byte of   */
     /* PID-55 in the ICD: 132. Spot-check.                                  */
-    if (has.chan[0].pages[0][0] != 132) {
+    if (nav.has.chan[0].pages[0][0] != 132) {
         fprintf(stderr, "test1: wrong encoded payload byte 0: got %u\n",
-                has.chan[0].pages[0][0]);
+                nav.has.chan[0].pages[0][0]);
         return 1;
     }
     printf("test1: parse Annex C HAS Page OK (header validated)\n");
@@ -217,20 +217,20 @@ static int test_annexc_page(void)
 /* Test 2: dummy HAS Page must be silently ignored ---------------------------*/
 static int test_dummy_page(void)
 {
-    gal_has_t has;
+    nav_t nav = {0};
     gtime_t t = {0};
     uint8_t dummy[HAS_PAGE_BYTES];
     int ret;
 
-    has_init(&has);
+    has_init(&nav.has);
     memset(dummy, 0, sizeof(dummy));
     dummy[0] = 0xAF;
     dummy[1] = 0x3B;
     dummy[2] = 0xC3;
-    ret = has_input_page(&has, t, dummy);
-    if (ret != 0 || has.chan[0].npage != 0) {
+    ret = has_input_page(&nav, t, dummy);
+    if (ret != 0 || nav.has.chan[0].npage != 0) {
         fprintf(stderr, "test2: dummy page not discarded (ret=%d npage=%d)\n",
-                ret, has.chan[0].npage);
+                ret, nav.has.chan[0].npage);
         return 1;
     }
     printf("test2: dummy page discarded OK\n");
@@ -239,18 +239,18 @@ static int test_dummy_page(void)
 /* Test 3: end-to-end reassembly + RS decode of the 15-page ICD example ------*/
 static int test_full_pipeline(void)
 {
-    gal_has_t has;
+    nav_t nav = {0};
     gtime_t t = {0};
     uint8_t page[HAS_PAGE_BYTES];
     int order[15] = {7,3,11,0,5,12,1,9,14,4,8,2,13,6,10}; /* shuffled order */
     int ret = 0, completed = 0, i, j, mismatches = 0;
 
-    has_init(&has);
+    has_init(&nav.has);
 
     for (i = 0; i < 15; i++) {
         j = order[i];
         build_page(0, 1, 7, 15, pids_anc[j], enc_anc[j], page);
-        ret = has_input_page(&has, t, page);
+        ret = has_input_page(&nav, t, page);
         if (ret == 1) {
             completed++;
             if (i != 14) {
@@ -266,17 +266,17 @@ static int test_full_pipeline(void)
                 completed);
         return 1;
     }
-    if (has.mt != 1 || has.mid != 7 || has.ms != 15 ||
-        has.n != 15 * 53) {
+    if (nav.has.mt != 1 || nav.has.mid != 7 || nav.has.ms != 15 ||
+        nav.has.n != 15 * 53) {
         fprintf(stderr, "test3: wrong assembled metadata: mt=%d mid=%d "
-                "ms=%d n=%d\n", has.mt, has.mid, has.ms, has.n);
+                "ms=%d n=%d\n", nav.has.mt, nav.has.mid, nav.has.ms, nav.has.n);
         return 1;
     }
     for (i = 0; i < 15 * 53; i++) {
-        if (has.msg[i] != dec_expected[i]) {
+        if (nav.has.msg[i] != dec_expected[i]) {
             if (mismatches < 5) {
                 fprintf(stderr, "test3: byte %d mismatch: got %u expect %u\n",
-                        i, has.msg[i], dec_expected[i]);
+                        i, nav.has.msg[i], dec_expected[i]);
             }
             mismatches++;
         }
@@ -287,7 +287,7 @@ static int test_full_pipeline(void)
         return 1;
     }
     printf("test3: full pipeline OK (15 shuffled HAS Pages -> %d-byte "
-           "message matches ICD Annex C)\n", has.n);
+           "message matches ICD Annex C)\n", nav.has.n);
     return 0;
 }
 int main(void)

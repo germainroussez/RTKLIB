@@ -1101,7 +1101,7 @@ static int decode_gal_e6b(raw_t *raw, int sat, int off)
     for (i = 0; i < HAS_PAGE_BYTES; i++) {
         has_page[i] = (uint8_t)getbitu(cnav, 14 + i * 8, 8);
     }
-    return has_input_page(&raw->nav.has, raw->time, has_page);
+    return has_input_page(&raw->nav, raw->time, has_page);
 }
 /* decode BDS navigation data ------------------------------------------------*/
 static int decode_cnav(raw_t *raw, int sat, int off)

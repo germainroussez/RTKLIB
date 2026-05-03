@@ -1878,7 +1878,7 @@ EXPORT int has_rs_decode(const uint8_t *enc, const uint8_t *pids, int k,
 
 /* Galileo HAS C/NAV page parser and reassembly ------------------------------*/
 EXPORT void has_init      (gal_has_t *has);
-EXPORT int  has_input_page(gal_has_t *has, gtime_t time, const uint8_t *page);
+EXPORT int  has_input_page(nav_t *nav, gtime_t time, const uint8_t *page);
 
 /* Galileo HAS MT1 message parser --------------------------------------------*/
 /* The optional has parameter provides the cached mask context used to size  */
